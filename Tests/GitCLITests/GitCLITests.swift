@@ -1,0 +1,270 @@
+//
+//  GitCLITests.swift
+//  Tests for SwiftGitCLI
+//
+//  Created by David Sherlock on 7/9/26.
+//
+
+import XCTest
+@testable import GitCLI
+
+final class GitCLITests: XCTestCase {
+
+    // MARK: - Temp-repo scaffolding
+
+    /// Temp directories created during a test, removed in `tearDown`.
+    private var scratchDirs: [URL] = []
+
+    override func tearDownWithError() throws {
+        for dir in scratchDirs { try? FileManager.default.removeItem(at: dir) }
+        scratchDirs.removeAll()
+    }
+
+    /// Creates a fresh git repo in a throwaway temp dir and returns its canonical
+    /// root (git-reported, so it survives the `/var` → `/private/var` symlink on macOS).
+    private func makeRepo(file: StaticString = #filePath, line: UInt = #line) throws -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("gitcli-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        scratchDirs.append(dir)
+        XCTAssertNotNil(Git.run(["init", "-q"], in: dir), "git init failed", file: file, line: line)
+        _ = Git.run(["config", "user.email", "test@example.com"], in: dir)
+        _ = Git.run(["config", "user.name", "Test Author"], in: dir)
+        _ = Git.run(["config", "commit.gpgsign", "false"], in: dir)
+        let root = try XCTUnwrap(Git.repoRoot(for: dir), "repoRoot returned nil", file: file, line: line)
+        return root
+    }
+
+    private func write(_ contents: String, to name: String, in root: URL) throws {
+        try contents.write(to: root.appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+
+    @discardableResult
+    private func commit(_ message: String, in root: URL) -> Bool {
+        Git.run(["commit", "-q", "-m", message], in: root) != nil
+    }
+
+    // MARK: - repoRoot / relativePath
+
+    func testRepoRootFromNestedDirectory() throws {
+        let root = try makeRepo()
+        let nested = root.appendingPathComponent("a/b", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        XCTAssertEqual(Git.repoRoot(for: nested)?.standardizedFileURL, root.standardizedFileURL)
+    }
+
+    func testRepoRootNilOutsideRepo() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("gitcli-norepo-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        scratchDirs.append(dir)
+        XCTAssertNil(Git.repoRoot(for: dir))
+    }
+
+    func testRelativePath() throws {
+        let root = try makeRepo()
+        // Create the file for real: `relativePath` standardizes paths, and on macOS
+        // the `/private/var`↔`/var` temp-dir symlink only reconciles for paths that
+        // exist on disk — which mirrors real callers (open files, `git status` entries).
+        let dir = root.appendingPathComponent("src", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("main.swift")
+        try write("x", to: "src/main.swift", in: root)
+        XCTAssertEqual(Git.relativePath(file, root: root), "src/main.swift")
+    }
+
+    func testRelativePathFallsBackForUnrelatedFile() throws {
+        let root = try makeRepo()
+        let outside = URL(fileURLWithPath: "/elsewhere/thing.txt")
+        XCTAssertEqual(Git.relativePath(outside, root: root), "thing.txt")
+    }
+
+    // MARK: - status
+
+    func testStatusUntracked() throws {
+        let root = try makeRepo()
+        try write("hello", to: "new.txt", in: root)
+        let status = Git.status(repoRoot: root)
+        XCTAssertEqual(status.count, 1)
+        XCTAssertEqual(status.first?.path, "new.txt")
+        XCTAssertEqual(status.first?.kind, .untracked)
+    }
+
+    func testStatusModified() throws {
+        let root = try makeRepo()
+        try write("one\n", to: "f.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("f.txt"), repoRoot: root)
+        commit("add f", in: root)
+        try write("one\ntwo\n", to: "f.txt", in: root)
+        XCTAssertEqual(Git.status(repoRoot: root).first?.kind, .modified)
+    }
+
+    func testStatusStagedAddition() throws {
+        let root = try makeRepo()
+        try write("x", to: "seed.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("seed.txt"), repoRoot: root)
+        commit("seed", in: root)
+        try write("brand new", to: "added.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("added.txt"), repoRoot: root)
+        let added = Git.status(repoRoot: root).first { $0.path == "added.txt" }
+        XCTAssertEqual(added?.kind, .added)
+    }
+
+    func testStatusDeleted() throws {
+        let root = try makeRepo()
+        try write("gone soon", to: "d.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("d.txt"), repoRoot: root)
+        commit("add d", in: root)
+        try FileManager.default.removeItem(at: root.appendingPathComponent("d.txt"))
+        XCTAssertEqual(Git.status(repoRoot: root).first?.kind, .deleted)
+    }
+
+    func testStatusRenamed() throws {
+        let root = try makeRepo()
+        try write("stable contents that git can match on rename\n", to: "old.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("old.txt"), repoRoot: root)
+        commit("add old", in: root)
+        _ = Git.run(["mv", "old.txt", "new.txt"], in: root)   // git mv stages the rename
+        let renamed = Git.status(repoRoot: root).first
+        XCTAssertEqual(renamed?.kind, .renamed)
+        XCTAssertEqual(renamed?.path, "new.txt")   // new path, not "old.txt -> new.txt"
+    }
+
+    // MARK: - stage / unstage / discard
+
+    func testStageThenUnstage() throws {
+        let root = try makeRepo()
+        // Seed an initial commit so HEAD exists — `git restore --staged` needs it,
+        // as it does for any real repository under review.
+        try write("seed", to: "seed.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("seed.txt"), repoRoot: root)
+        commit("seed", in: root)
+
+        try write("body", to: "s.txt", in: root)
+        XCTAssertTrue(Git.stage(root.appendingPathComponent("s.txt"), repoRoot: root))
+        XCTAssertEqual(Git.status(repoRoot: root).first { $0.path == "s.txt" }?.kind, .added)
+        XCTAssertTrue(Git.unstage(root.appendingPathComponent("s.txt"), repoRoot: root))
+        XCTAssertEqual(Git.status(repoRoot: root).first { $0.path == "s.txt" }?.kind, .untracked)
+    }
+
+    func testDiscardUntrackedDeletesFile() throws {
+        let root = try makeRepo()
+        let file = root.appendingPathComponent("junk.txt")
+        try write("junk", to: "junk.txt", in: root)
+        XCTAssertTrue(Git.discard(file, kind: .untracked, repoRoot: root))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    func testDiscardModifiedRevertsToHead() throws {
+        let root = try makeRepo()
+        let file = root.appendingPathComponent("c.txt")
+        try write("original\n", to: "c.txt", in: root)
+        _ = Git.stage(file, repoRoot: root)
+        commit("add c", in: root)
+        try write("tampered\n", to: "c.txt", in: root)
+        XCTAssertTrue(Git.discard(file, kind: .modified, repoRoot: root))
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "original\n")
+        XCTAssertTrue(Git.status(repoRoot: root).isEmpty)
+    }
+
+    // MARK: - lineChanges
+
+    func testLineChangesMarksModifiedLine() throws {
+        let root = try makeRepo()
+        let file = root.appendingPathComponent("code.txt")
+        try write("line1\nline2\nline3\n", to: "code.txt", in: root)
+        _ = Git.stage(file, repoRoot: root)
+        commit("seed code", in: root)
+        try write("line1\nCHANGED\nline3\n", to: "code.txt", in: root)
+        let marks = Git.lineChanges(for: file, repoRoot: root)
+        XCTAssertEqual(marks[2], .modified)
+        XCTAssertNil(marks[1])
+        XCTAssertNil(marks[3])
+    }
+
+    func testLineChangesMarksAddedLines() throws {
+        let root = try makeRepo()
+        let file = root.appendingPathComponent("code.txt")
+        try write("a\nb\n", to: "code.txt", in: root)
+        _ = Git.stage(file, repoRoot: root)
+        commit("seed", in: root)
+        try write("a\nb\nc\nd\n", to: "code.txt", in: root)
+        let marks = Git.lineChanges(for: file, repoRoot: root)
+        XCTAssertEqual(marks[3], .added)
+        XCTAssertEqual(marks[4], .added)
+    }
+
+    // MARK: - removedLines
+
+    func testRemovedLinesGhostsDeletedRowAboveSurvivingLine() throws {
+        let root = try makeRepo()
+        let file = root.appendingPathComponent("code.txt")
+        try write("a\nb\nc\n", to: "code.txt", in: root)
+        _ = Git.stage(file, repoRoot: root)
+        commit("seed", in: root)
+        try write("a\nc\n", to: "code.txt", in: root)   // delete "b"
+        let removed = Git.removedLines(for: file, repoRoot: root)
+        XCTAssertEqual(removed[2], ["b"])   // "b" ghosts above new line 2 ("c")
+    }
+
+    // MARK: - blame
+
+    func testBlameReportsAuthorAndSummary() throws {
+        let root = try makeRepo()
+        let file = root.appendingPathComponent("b.txt")
+        try write("first line\n", to: "b.txt", in: root)
+        _ = Git.stage(file, repoRoot: root)
+        commit("initial import", in: root)
+        let info = try XCTUnwrap(Git.blame(for: file, line: 1, repoRoot: root))
+        XCTAssertEqual(info.author, "Test Author")
+        XCTAssertEqual(info.summary, "initial import")
+        XCTAssertFalse(info.timeAgo.isEmpty)
+    }
+
+    func testBlameNilForNonPositiveLine() throws {
+        let root = try makeRepo()
+        try write("x\n", to: "b.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("b.txt"), repoRoot: root)
+        commit("c", in: root)
+        XCTAssertNil(Git.blame(for: root.appendingPathComponent("b.txt"), line: 0, repoRoot: root))
+    }
+
+    // MARK: - run
+
+    func testRunReturnsNilOnFailure() throws {
+        let root = try makeRepo()
+        XCTAssertNil(Git.run(["definitely-not-a-git-subcommand"], in: root))
+    }
+
+    // MARK: - counts (pure hunk-field parser)
+
+    func testCountsParsesStartAndCount() {
+        XCTAssertEqual(Git.counts(Substring("+12,3")).0, 12)
+        XCTAssertEqual(Git.counts(Substring("+12,3")).1, 3)
+        XCTAssertEqual(Git.counts(Substring("-40,7")).0, 40)
+        XCTAssertEqual(Git.counts(Substring("-40,7")).1, 7)
+    }
+
+    func testCountsDefaultsMissingCountToOne() {
+        XCTAssertEqual(Git.counts(Substring("+5")).1, 1)
+        XCTAssertEqual(Git.counts(Substring("-1")).1, 1)
+    }
+
+    func testCountsHandlesZeroCount() {
+        let (start, count) = Git.counts(Substring("+1,0"))
+        XCTAssertEqual(start, 1)
+        XCTAssertEqual(count, 0)
+    }
+
+    // MARK: - relativeTime (pure, deterministic via injected `now`)
+
+    func testRelativeTimeBuckets() {
+        let t: TimeInterval = 1_000_000
+        XCTAssertEqual(Git.relativeTime(t, now: t + 30), "just now")
+        XCTAssertEqual(Git.relativeTime(t, now: t + 120), "2m ago")
+        XCTAssertEqual(Git.relativeTime(t, now: t + 2 * 3600), "2h ago")
+        XCTAssertEqual(Git.relativeTime(t, now: t + 3 * 86400), "3d ago")
+        XCTAssertEqual(Git.relativeTime(t, now: t + 40 * 86400), "1mo ago")
+        XCTAssertEqual(Git.relativeTime(t, now: t + 400 * 86400), "1y ago")
+    }
+}
