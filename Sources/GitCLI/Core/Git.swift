@@ -56,7 +56,10 @@ public enum Git {
         p.currentDirectoryURL = dir
         let out = Pipe()
         p.standardOutput = out
-        p.standardError = Pipe()
+        // Discard stderr outright. Attaching a Pipe that is never drained deadlocks
+        // once git writes ~64KB of warnings: the child blocks in write(2) on stderr
+        // while we block reading stdout to EOF, and neither ever progresses.
+        p.standardError = FileHandle.nullDevice
         do { try p.run() } catch { return nil }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
@@ -78,9 +81,42 @@ public enum Git {
     /// The path of `file` relative to the repository `root`.
     ///
     /// Falls back to the file's last path component when `file` is not located
-    /// under `root`.
+    /// under `root`. Mutating operations (stage/unstage/discard) never use the
+    /// fallback — they refuse to act on files outside `root` instead of guessing
+    /// a pathspec (see ``relativePathIfUnderRoot(_:root:)``).
     public static func relativePath(_ file: URL, root: URL) -> String {
-        let f = file.standardizedFileURL.path, r = root.standardizedFileURL.path
-        return f.hasPrefix(r + "/") ? String(f.dropFirst(r.count + 1)) : file.lastPathComponent
+        relativePathIfUnderRoot(file, root: root) ?? file.lastPathComponent
+    }
+
+    /// The path of `file` relative to `root`, or `nil` when `file` is not under `root`.
+    ///
+    /// Compares standardized paths first (cheap, no disk I/O), then fully
+    /// canonicalized paths. Standardization/symlink resolution only reconciles
+    /// the macOS `/private/var` ↔ `/var` symlink for paths that exist on disk,
+    /// so a *deleted* file expressed via the unresolved form would otherwise
+    /// fail the prefix check — see ``canonicalPath(_:)``.
+    static func relativePathIfUnderRoot(_ file: URL, root: URL) -> String? {
+        func relative(_ f: String, _ r: String) -> String? {
+            f.hasPrefix(r + "/") ? String(f.dropFirst(r.count + 1)) : nil
+        }
+        if let rel = relative(file.standardizedFileURL.path, root.standardizedFileURL.path) {
+            return rel
+        }
+        return relative(canonicalPath(file), canonicalPath(root))
+    }
+
+    /// Canonicalizes `url` even when it no longer exists on disk: resolves
+    /// symlinks over the longest existing prefix (which strips macOS's
+    /// `/private` designator), then re-appends the nonexistent tail verbatim.
+    private static func canonicalPath(_ url: URL) -> String {
+        var existing = url.standardizedFileURL
+        var tail: [String] = []
+        while !FileManager.default.fileExists(atPath: existing.path), existing.path != "/" {
+            tail.append(existing.lastPathComponent)
+            existing = existing.deletingLastPathComponent()
+        }
+        var resolved = existing.resolvingSymlinksInPath()
+        for component in tail.reversed() { resolved.appendPathComponent(component) }
+        return resolved.path
     }
 }

@@ -79,6 +79,32 @@ final class GitCLITests: XCTestCase {
         XCTAssertEqual(Git.relativePath(outside, root: root), "thing.txt")
     }
 
+    func testRelativePathIfUnderRootNilForUnrelatedFile() throws {
+        let root = try makeRepo()
+        let outside = URL(fileURLWithPath: "/elsewhere/thing.txt")
+        XCTAssertNil(Git.relativePathIfUnderRoot(outside, root: root))
+    }
+
+    func testRelativePathReconcilesPrivateVarSymlinkForDeletedFile() throws {
+        // Regression: git reports roots in the resolved `/private/var/...` form,
+        // but `standardizedFileURL` only strips `/private` for paths that EXIST —
+        // so a deleted file expressed via the `/private` form used to fail the
+        // prefix check and fall back to a bare (wrong) filename.
+        let root = try makeRepo()   // git-reported, i.e. `/private/var/...` on macOS
+        try XCTSkipUnless(root.path.hasPrefix("/private/var/"),
+                          "requires the macOS /private/var temp symlink")
+        let sub = root.appendingPathComponent("sub", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try write("x", to: "sub/config.json", in: root)
+        _ = Git.stage(root.appendingPathComponent("sub/config.json"), repoRoot: root)
+        commit("add sub/config", in: root)
+        try FileManager.default.removeItem(at: sub.appendingPathComponent("config.json"))
+        // Deleted file in /private form vs the same root — must still resolve fully.
+        let deleted = URL(fileURLWithPath: root.path + "/sub/config.json")
+        XCTAssertEqual(Git.relativePathIfUnderRoot(deleted, root: root), "sub/config.json")
+        XCTAssertEqual(Git.relativePath(deleted, root: root), "sub/config.json")
+    }
+
     // MARK: - status
 
     func testStatusUntracked() throws {
@@ -130,6 +156,54 @@ final class GitCLITests: XCTestCase {
         XCTAssertEqual(renamed?.path, "new.txt")   // new path, not "old.txt -> new.txt"
     }
 
+    func testStatusPathWithSpacesIsNotQuoted() throws {
+        // Regression: porcelain v1 C-quotes any path containing a space
+        // (`?? "My File.txt"`); the parser used to return the quotes verbatim.
+        let root = try makeRepo()
+        try write("hello", to: "My File.txt", in: root)
+        let status = Git.status(repoRoot: root)
+        XCTAssertEqual(status.count, 1)
+        XCTAssertEqual(status.first?.path, "My File.txt")
+        XCTAssertEqual(status.first?.kind, .untracked)
+    }
+
+    func testStatusNonASCIIPathIsNotOctalEscaped() throws {
+        // Regression: with core.quotepath=true (the default), porcelain v1 emits
+        // non-ASCII names as literal octal escapes (`"caf\303\251.txt"`).
+        let root = try makeRepo()
+        try write("hello", to: "café.txt", in: root)
+        let status = Git.status(repoRoot: root)
+        XCTAssertEqual(status.count, 1)
+        XCTAssertEqual(status.first?.path.precomposedStringWithCanonicalMapping,
+                       "café.txt".precomposedStringWithCanonicalMapping)
+        XCTAssertEqual(status.first?.kind, .untracked)
+    }
+
+    func testStatusArrowInFilenameIsNotSplitAsRename() throws {
+        // Regression: the " -> " rename split was applied to every line, so an
+        // untracked file literally named `notes -> final.txt` was truncated.
+        let root = try makeRepo()
+        try write("hello", to: "notes -> final.txt", in: root)
+        let status = Git.status(repoRoot: root)
+        XCTAssertEqual(status.count, 1)
+        XCTAssertEqual(status.first?.path, "notes -> final.txt")
+        XCTAssertEqual(status.first?.kind, .untracked)
+    }
+
+    func testStatusRenamedPathsWithSpaces() throws {
+        // Renames of C-quotable paths: `-z` emits `XY new\0old\0`, so the new
+        // path must come back verbatim and the old-path field must be skipped.
+        let root = try makeRepo()
+        try write("stable contents that git can match on rename\n", to: "old name.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("old name.txt"), repoRoot: root)
+        commit("add old name", in: root)
+        _ = Git.run(["mv", "old name.txt", "new name.txt"], in: root)
+        let status = Git.status(repoRoot: root)
+        XCTAssertEqual(status.count, 1)
+        XCTAssertEqual(status.first?.path, "new name.txt")
+        XCTAssertEqual(status.first?.kind, .renamed)
+    }
+
     // MARK: - stage / unstage / discard
 
     func testStageThenUnstage() throws {
@@ -165,6 +239,51 @@ final class GitCLITests: XCTestCase {
         XCTAssertTrue(Git.discard(file, kind: .modified, repoRoot: root))
         XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "original\n")
         XCTAssertTrue(Git.status(repoRoot: root).isEmpty)
+    }
+
+    func testDiscardRefusesFileOutsideRepoAndDoesNotClobberSameNamedRootFile() throws {
+        // Regression: `relativePath` used to fall back to the bare filename for a
+        // file it couldn't place under root, so `discard` ran
+        // `git checkout HEAD -- config.json` and wiped an UNRELATED root-level
+        // file's local edits. Mutating actions must refuse instead.
+        let root = try makeRepo()
+        try write("original\n", to: "config.json", in: root)
+        _ = Git.stage(root.appendingPathComponent("config.json"), repoRoot: root)
+        commit("add config", in: root)
+        try write("precious local edits\n", to: "config.json", in: root)
+
+        let outside = URL(fileURLWithPath: "/elsewhere/sub/config.json")
+        XCTAssertFalse(Git.discard(outside, kind: .modified, repoRoot: root))
+        XCTAssertFalse(Git.stage(outside, repoRoot: root))
+        XCTAssertFalse(Git.unstage(outside, repoRoot: root))
+        // The unrelated root-level file's edits must survive.
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("config.json"),
+                                  encoding: .utf8), "precious local edits\n")
+    }
+
+    func testDiscardDeletedFileViaUnresolvedSymlinkFormRestoresRightFile() throws {
+        // Regression (end-to-end form of the /private/var finding): discarding a
+        // DELETED sub/config.json used to fall back to the "config.json" pathspec,
+        // reverting the root-level config.json instead of restoring the deletion.
+        let root = try makeRepo()
+        try XCTSkipUnless(root.path.hasPrefix("/private/var/"),
+                          "requires the macOS /private/var temp symlink")
+        let sub = root.appendingPathComponent("sub", isDirectory: true)
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try write("root original\n", to: "config.json", in: root)
+        try write("sub original\n", to: "sub/config.json", in: root)
+        _ = Git.stage(root.appendingPathComponent("config.json"), repoRoot: root)
+        _ = Git.stage(root.appendingPathComponent("sub/config.json"), repoRoot: root)
+        commit("seed both", in: root)
+        try write("root local edits\n", to: "config.json", in: root)
+        try FileManager.default.removeItem(at: sub.appendingPathComponent("config.json"))
+
+        let deleted = URL(fileURLWithPath: root.path + "/sub/config.json")
+        XCTAssertTrue(Git.discard(deleted, kind: .deleted, repoRoot: root))
+        XCTAssertEqual(try String(contentsOf: sub.appendingPathComponent("config.json"),
+                                  encoding: .utf8), "sub original\n")   // restored
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("config.json"),
+                                  encoding: .utf8), "root local edits\n")   // untouched
     }
 
     // MARK: - lineChanges
@@ -234,6 +353,19 @@ final class GitCLITests: XCTestCase {
     func testRunReturnsNilOnFailure() throws {
         let root = try makeRepo()
         XCTAssertNil(Git.run(["definitely-not-a-git-subcommand"], in: root))
+    }
+
+    func testRunDoesNotDeadlockOnLargeStderr() throws {
+        // Regression: `run` attached a stderr Pipe it never drained, so a child
+        // writing >= ~64KB (one kernel pipe buffer) to stderr blocked in write(2)
+        // while we blocked reading stdout to EOF — a permanent mutual deadlock.
+        // Exercise the exact pipe wiring via the swappable `executable` hook.
+        let saved = Git.executable
+        defer { Git.executable = saved }
+        Git.executable = "/bin/sh"
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        let out = Git.run(["-c", "i=0; while [ $i -lt 4096 ]; do echo 'stderr noise stderr noise stderr noise' 1>&2; i=$((i+1)); done; echo ok"], in: dir)
+        XCTAssertEqual(out, "ok\n")
     }
 
     // MARK: - counts (pure hunk-field parser)

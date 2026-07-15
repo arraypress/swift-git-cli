@@ -13,19 +13,27 @@ public extension Git {
 
     /// Working-tree changes versus `HEAD`, one entry per changed file.
     ///
-    /// Parses `git status --porcelain=v1`. For renames, `path` is the new path.
+    /// Parses `git status --porcelain=v1 -z`. The `-z` (NUL-delimited) format
+    /// emits pathnames verbatim — no C-style quoting for spaces, quotes,
+    /// backslashes, or non-ASCII characters — so paths match the disk exactly.
+    /// For renames/copies, `path` is the new path (the old path arrives as a
+    /// separate NUL-terminated field and is skipped).
     ///
     /// - Parameter root: The repository root (see ``repoRoot(for:)``).
     /// - Returns: `(path, kind)` pairs, where `path` is repository-relative.
     static func status(repoRoot root: URL) -> [(path: String, kind: GitChangeKind)] {
-        guard let out = run(["status", "--porcelain=v1"], in: root) else { return [] }
+        guard let out = run(["status", "--porcelain=v1", "-z"], in: root) else { return [] }
         var result: [(String, GitChangeKind)] = []
-        for raw in out.split(separator: "\n", omittingEmptySubsequences: true) {
-            let line = String(raw)
-            guard line.count >= 4 else { continue }
-            let code = String(line.prefix(2))
-            var path = String(line.dropFirst(3))
-            if let arrow = path.range(of: " -> ") { path = String(path[arrow.upperBound...]) }  // renames
+        let fields = out.split(separator: "\0", omittingEmptySubsequences: true)
+        var i = 0
+        while i < fields.count {
+            let entry = String(fields[i])
+            i += 1
+            guard entry.count >= 4 else { continue }
+            let code = String(entry.prefix(2))
+            let path = String(entry.dropFirst(3))
+            // Rename/copy entries carry the OLD path as the next NUL field — skip it.
+            if code.contains("R") || code.contains("C") { i += 1 }
             let kind: GitChangeKind
             if code.contains("?") { kind = .untracked }
             else if code.contains("A") { kind = .added }
