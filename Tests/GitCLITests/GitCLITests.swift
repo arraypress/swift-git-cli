@@ -348,6 +348,104 @@ final class GitCLITests: XCTestCase {
         XCTAssertNil(Git.blame(for: root.appendingPathComponent("b.txt"), line: 0, repoRoot: root))
     }
 
+    // MARK: - currentBranch / worktrees
+
+    /// Fresh temp directory path (not created) for `git worktree add`, cleaned up in tearDown.
+    private func worktreeScratchPath(_ label: String) -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("gitcli-wt-\(label)-\(UUID().uuidString)", isDirectory: true)
+        scratchDirs.append(dir)
+        return dir
+    }
+
+    func testCurrentBranchReportsCheckedOutBranch() throws {
+        let root = try makeRepo()
+        try write("x\n", to: "f.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("f.txt"), repoRoot: root)
+        commit("seed", in: root)
+        XCTAssertNotNil(Git.run(["checkout", "-q", "-b", "feature-x"], in: root))
+        XCTAssertEqual(Git.currentBranch(repoRoot: root), "feature-x")
+    }
+
+    func testCurrentBranchDetachedHeadFallsBackToShortSHA() throws {
+        let root = try makeRepo()
+        try write("x\n", to: "f.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("f.txt"), repoRoot: root)
+        commit("seed", in: root)
+        let sha = try XCTUnwrap(Git.run(["rev-parse", "--short", "HEAD"], in: root))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertNotNil(Git.run(["checkout", "-q", "--detach", "HEAD"], in: root))
+        let branch = Git.currentBranch(repoRoot: root)
+        XCTAssertEqual(branch, sha)
+        XCTAssertNotEqual(branch, "HEAD")   // the literal detached marker must never leak out
+    }
+
+    func testCurrentBranchNilForUnbornHead() throws {
+        let root = try makeRepo()   // no commits yet — HEAD is unborn, rev-parse fails
+        XCTAssertNil(Git.currentBranch(repoRoot: root))
+    }
+
+    func testWorktreesListsMainAndLinkedWorktree() throws {
+        let root = try makeRepo()
+        try write("x\n", to: "f.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("f.txt"), repoRoot: root)
+        commit("seed", in: root)
+        XCTAssertNotNil(Git.run(["checkout", "-q", "-b", "main-branch"], in: root))
+        let linkedPath = worktreeScratchPath("linked")
+        XCTAssertNotNil(Git.run(["worktree", "add", "-q", linkedPath.path, "-b", "wt-branch"],
+                                in: root))
+
+        let trees = Git.worktrees(repoRoot: root)
+        XCTAssertEqual(trees.count, 2)
+
+        let main = try XCTUnwrap(trees.first)
+        XCTAssertTrue(main.isMain)
+        XCTAssertEqual(main.branch, "main-branch")   // refs/heads/ prefix stripped
+        XCTAssertTrue(main.isCurrent(relativeTo: root))
+
+        let linked = try XCTUnwrap(trees.last)
+        XCTAssertFalse(linked.isMain)
+        XCTAssertEqual(linked.branch, "wt-branch")
+        XCTAssertFalse(linked.isCurrent(relativeTo: root))
+        // Canonical comparison must reconcile git's /private/var form with the
+        // /var form the test created the directory under.
+        XCTAssertTrue(linked.isCurrent(relativeTo: linkedPath))
+    }
+
+    func testWorktreesFromInsideLinkedWorktree() throws {
+        let root = try makeRepo()
+        try write("x\n", to: "f.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("f.txt"), repoRoot: root)
+        commit("seed", in: root)
+        let linkedPath = worktreeScratchPath("inside")
+        XCTAssertNotNil(Git.run(["worktree", "add", "-q", linkedPath.path, "-b", "wt-inside"],
+                                in: root))
+
+        // repoRoot from inside the linked worktree reports the LINKED root.
+        let linkedRoot = try XCTUnwrap(Git.repoRoot(for: linkedPath))
+        let trees = Git.worktrees(repoRoot: linkedRoot)
+        XCTAssertEqual(trees.count, 2)
+        XCTAssertTrue(trees[0].isMain)                              // main still listed first
+        XCTAssertFalse(trees[0].isCurrent(relativeTo: linkedRoot))
+        XCTAssertTrue(trees[1].isCurrent(relativeTo: linkedRoot))
+        XCTAssertEqual(Git.currentBranch(repoRoot: linkedRoot), "wt-inside")
+    }
+
+    func testWorktreesDetachedLinkedWorktreeHasNilBranch() throws {
+        let root = try makeRepo()
+        try write("x\n", to: "f.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("f.txt"), repoRoot: root)
+        commit("seed", in: root)
+        let linkedPath = worktreeScratchPath("detached")
+        XCTAssertNotNil(Git.run(["worktree", "add", "-q", "--detach", linkedPath.path],
+                                in: root))
+
+        let trees = Git.worktrees(repoRoot: root)
+        XCTAssertEqual(trees.count, 2)
+        XCTAssertNotNil(trees[0].branch)   // main is on a real branch
+        XCTAssertNil(trees[1].branch)      // detached entry has no branch line
+    }
+
     // MARK: - run
 
     func testRunReturnsNilOnFailure() throws {

@@ -21,6 +21,8 @@ public struct BlameInfo: Sendable, Equatable {
     /// The commit's summary line (its first line).
     public let summary: String
 
+    /// Creates a blame record. Normally produced by ``Git/blame(for:line:repoRoot:)``;
+    /// public for constructing fixtures in tests and previews.
     public init(author: String, timeAgo: String, summary: String) {
         self.author = author
         self.timeAgo = timeAgo

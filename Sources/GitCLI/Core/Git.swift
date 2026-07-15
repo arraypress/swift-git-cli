@@ -31,6 +31,7 @@ import Foundation
 /// - Diff: ``lineChanges(for:repoRoot:)``, ``removedLines(for:repoRoot:)``
 /// - Blame: ``blame(for:line:repoRoot:)``
 /// - Actions: ``stage(_:repoRoot:)``, ``unstage(_:repoRoot:)``, ``discard(_:kind:repoRoot:)``
+/// - Worktrees: ``currentBranch(repoRoot:)``, ``worktrees(repoRoot:)``
 ///
 /// - Note: This wraps the `git` executable rather than linking libgit2, so a
 ///   working `git` must be installed at ``executable``.
@@ -108,7 +109,7 @@ public enum Git {
     /// Canonicalizes `url` even when it no longer exists on disk: resolves
     /// symlinks over the longest existing prefix (which strips macOS's
     /// `/private` designator), then re-appends the nonexistent tail verbatim.
-    private static func canonicalPath(_ url: URL) -> String {
+    static func canonicalPath(_ url: URL) -> String {
         var existing = url.standardizedFileURL
         var tail: [String] = []
         while !FileManager.default.fileExists(atPath: existing.path), existing.path != "/" {

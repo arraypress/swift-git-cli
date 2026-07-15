@@ -1,6 +1,6 @@
 # Swift Git CLI
 
-A thin, synchronous Swift wrapper over the `git` command-line tool — repository status, per-line diff markers, phantom removed-line data for inline diffs, blame, and staging actions. Pure Foundation, zero dependencies, no libgit2.
+A thin, synchronous Swift wrapper over the `git` command-line tool — repository status, per-line diff markers, phantom removed-line data for inline diffs, blame, staging actions, branch identity, and worktree enumeration. Pure Foundation, zero dependencies, no libgit2.
 
 ## Features
 
@@ -10,8 +10,10 @@ A thin, synchronous Swift wrapper over the `git` command-line tool — repositor
 - 🧾 **Fast single-line blame** — `Git.blame(for:line:repoRoot:)` returns author, a short relative age, and the commit summary
 - ✅ **Staging actions** — `stage`, `unstage`, and a destructive `discard` (revert-to-HEAD or delete-untracked)
 - 🧭 **Repo discovery** — `Git.repoRoot(for:)` and repo-relative path resolution
+- 🌿 **Branch identity** — `Git.currentBranch(repoRoot:)` returns the checked-out branch name, falling back to the short commit SHA on a detached `HEAD`
+- 🌳 **Worktree enumeration** — `Git.worktrees(repoRoot:)` lists every `GitWorktree` (path, branch, main/linked) via `git worktree list --porcelain`, with `isCurrent(relativeTo:)` for symlink-safe "which one am I in?" checks
 - 🪶 **Zero dependencies** — Foundation only; shells out to the system `git`
-- 🧪 **Fully tested** — integration tests against throwaway repos plus direct unit tests of the diff-hunk and relative-time parsers
+- 🧪 **Fully tested** — integration tests against throwaway repos (including linked and detached worktrees) plus direct unit tests of the diff-hunk and relative-time parsers
 
 ## Requirements
 
@@ -59,6 +61,15 @@ if let blame = Git.blame(for: fileURL, line: 42, repoRoot: root) {
 Git.stage(fileURL, repoRoot: root)
 Git.unstage(fileURL, repoRoot: root)
 Git.discard(fileURL, kind: .modified, repoRoot: root)   // destructive
+
+// Which branch is checked out? (short SHA when HEAD is detached)
+let branch = Git.currentBranch(repoRoot: root)   // e.g. "main"
+
+// All worktrees of the repository, main first.
+for tree in Git.worktrees(repoRoot: root) {
+    let marker = tree.isCurrent(relativeTo: root) ? "→" : " "
+    print(marker, tree.branch ?? "(detached)", tree.path.path, tree.isMain ? "[main]" : "")
+}
 ```
 
 ### Using a non-default git
@@ -71,7 +82,8 @@ Git.executable = "/opt/homebrew/bin/git"
 
 - All calls are **synchronous** and cheap. When scanning a whole repository, dispatch them off the main queue.
 - `discard` is **destructive**: `.untracked` files are removed from disk; all other kinds are checked out from `HEAD`, discarding local edits.
-- Actions like `unstage` (`git restore --staged`) require an existing `HEAD` — i.e. a repository with at least one commit.
+- Actions like `unstage` (`git restore --staged`) require an existing `HEAD` — i.e. a repository with at least one commit. `currentBranch` likewise returns `nil` on an unborn `HEAD`.
+- Escape hatch: `Git.run(_:in:)` runs any raw `git` invocation and returns its stdout (`nil` on failure).
 
 ## License
 
