@@ -116,6 +116,22 @@ final class GitCLITests: XCTestCase {
         XCTAssertEqual(status.first?.kind, .untracked)
     }
 
+    func testStatusUntrackedDirectoryListsFilesIndividually() throws {
+        // Regression: without `-uall`, porcelain v1 collapses a brand-new
+        // untracked directory to a single trailing-slash entry
+        // (`?? NewFeature/`), so the files inside never reached callers that
+        // decorate per file (sidebar badges, tab tints).
+        let root = try makeRepo()
+        let dir = root.appendingPathComponent("NewFeature", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try write("a", to: "NewFeature/a.swift", in: root)
+        try write("b", to: "NewFeature/b.swift", in: root)
+        let status = Git.status(repoRoot: root)
+        XCTAssertEqual(Set(status.map(\.path)), ["NewFeature/a.swift", "NewFeature/b.swift"])
+        XCTAssertTrue(status.allSatisfy { $0.kind == .untracked })
+        XCTAssertFalse(status.contains { $0.path.hasSuffix("/") })   // no directory entries
+    }
+
     func testStatusModified() throws {
         let root = try makeRepo()
         try write("one\n", to: "f.txt", in: root)
