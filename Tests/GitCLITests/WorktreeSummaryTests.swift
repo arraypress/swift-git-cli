@@ -145,4 +145,30 @@ final class WorktreeSummaryTests: XCTestCase {
         XCTAssertEqual(Git.worktrees(repoRoot: root).count, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: linked.path))
     }
+
+    func testForceRemoveOverridesALock() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wtlock-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        scratchDirs.append(root)
+        XCTAssertNotNil(Git.run(["init", "-q"], in: root))
+        _ = Git.run(["config", "user.email", "t@e.com"], in: root)
+        _ = Git.run(["config", "user.name", "T"], in: root)
+        _ = Git.run(["config", "commit.gpgsign", "false"], in: root)
+        try "seed".write(to: root.appendingPathComponent("seed.txt"), atomically: true, encoding: .utf8)
+        _ = Git.run(["add", "-A"], in: root)
+        _ = Git.run(["commit", "-q", "-m", "seed"], in: root)
+
+        let linked = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wtlock-linked-\(UUID().uuidString)", isDirectory: true)
+        scratchDirs.append(linked)
+        XCTAssertNotNil(Git.run(["worktree", "add", "-q", "-b", "feature", linked.path], in: root))
+        // Lock the (clean) worktree: a plain remove and a single --force both refuse;
+        // only --force --force (what force: true now passes) can override a lock.
+        XCTAssertNotNil(Git.run(["worktree", "lock", linked.path], in: root))
+
+        XCTAssertFalse(Git.removeWorktree(linked, repoRoot: root))              // locked → refused
+        XCTAssertTrue(Git.removeWorktree(linked, repoRoot: root, force: true))  // -f -f overrides
+        XCTAssertEqual(Git.worktrees(repoRoot: root).count, 1)
+    }
 }

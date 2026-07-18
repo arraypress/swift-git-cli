@@ -92,19 +92,21 @@ public extension Git {
     }
 
     /// Removes a linked worktree (`git worktree remove`). **Destructive** — it
-    /// deletes the worktree's directory. Refuses (returns `false`) if the worktree
-    /// has uncommitted changes or submodules unless `force` is set, and git itself
-    /// refuses to remove the main worktree.
+    /// deletes the worktree's directory. A plain call refuses (returns `false`)
+    /// when the worktree has uncommitted changes, submodules, **or is locked**;
+    /// git also refuses to remove the main worktree.
     ///
     /// - Parameters:
     ///   - worktree: the linked worktree's path (from ``GitWorktree/path``).
     ///   - root: any worktree's root (the command locates the shared repo).
-    ///   - force: pass `--force` to remove even a dirty worktree.
+    ///   - force: when `true`, passes `--force --force`, which overrides *both* a
+    ///     dirty tree and a lock (git requires the doubled flag to override a
+    ///     lock). Discards uncommitted changes.
     /// - Returns: `true` on success.
     @discardableResult
     static func removeWorktree(_ worktree: URL, repoRoot root: URL, force: Bool = false) -> Bool {
         var args = ["worktree", "remove"]
-        if force { args.append("--force") }
+        if force { args.append("--force"); args.append("--force") }   // -f -f overrides a lock too
         args.append(worktree.path)
         return run(args, in: root) != nil
     }
