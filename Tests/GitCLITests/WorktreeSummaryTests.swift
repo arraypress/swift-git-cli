@@ -120,4 +120,29 @@ final class WorktreeSummaryTests: XCTestCase {
         XCTAssertTrue(main.isDirty)
         XCTAssertTrue(feature.isDirty)
     }
+
+    func testRemoveWorktreeDropsALinkedTree() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wtrm-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        scratchDirs.append(root)
+        XCTAssertNotNil(Git.run(["init", "-q"], in: root))
+        _ = Git.run(["config", "user.email", "t@e.com"], in: root)
+        _ = Git.run(["config", "user.name", "T"], in: root)
+        _ = Git.run(["config", "commit.gpgsign", "false"], in: root)
+        try "seed".write(to: root.appendingPathComponent("seed.txt"), atomically: true, encoding: .utf8)
+        _ = Git.run(["add", "-A"], in: root)
+        _ = Git.run(["commit", "-q", "-m", "seed"], in: root)
+
+        let linked = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wtrm-linked-\(UUID().uuidString)", isDirectory: true)
+        scratchDirs.append(linked)
+        XCTAssertNotNil(Git.run(["worktree", "add", "-q", "-b", "feature", linked.path], in: root))
+        XCTAssertEqual(Git.worktrees(repoRoot: root).count, 2)
+
+        // Clean linked tree removes without force.
+        XCTAssertTrue(Git.removeWorktree(linked, repoRoot: root))
+        XCTAssertEqual(Git.worktrees(repoRoot: root).count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: linked.path))
+    }
 }
