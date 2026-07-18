@@ -73,4 +73,19 @@ public extension Git {
         flush()   // porcelain output may or may not end with a trailing blank line
         return result
     }
+
+    /// Every worktree of the repository containing `root`, each paired with a
+    /// per-kind tally of its uncommitted changes — the data for a parallel-agent
+    /// review rail.
+    ///
+    /// Runs one `git status` per worktree (against that worktree's own path), so
+    /// the cost scales with the number of worktrees. Call off-main.
+    ///
+    /// - Parameter root: Any worktree's root; the full set is summarized.
+    /// - Returns: One ``WorktreeSummary`` per worktree, main first, or `[]` on failure.
+    static func worktreeSummaries(repoRoot root: URL) -> [WorktreeSummary] {
+        worktrees(repoRoot: root).map {
+            WorktreeSummary.make(worktree: $0, status: status(repoRoot: $0.path))
+        }
+    }
 }
