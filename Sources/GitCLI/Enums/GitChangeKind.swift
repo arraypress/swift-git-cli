@@ -31,4 +31,16 @@ public enum GitChangeKind: Sendable, Equatable {
 
     /// A tracked file that git detected as renamed.
     case renamed
+
+    /// The single-letter status badge git uses in short/porcelain output
+    /// (`A`/`M`/`D`/`R`/`U`) — for a Changes-panel or gutter badge.
+    public var letter: String {
+        switch self {
+        case .added:     return "A"
+        case .modified:  return "M"
+        case .deleted:   return "D"
+        case .renamed:   return "R"
+        case .untracked: return "U"
+        }
+    }
 }

@@ -12,8 +12,9 @@ A thin, synchronous Swift wrapper over the `git` command-line tool — repositor
 - 🧭 **Repo discovery** — `Git.repoRoot(for:)` and repo-relative path resolution
 - 🌿 **Branch identity** — `Git.currentBranch(repoRoot:)` returns the checked-out branch name, falling back to the short commit SHA on a detached `HEAD`
 - 🌳 **Worktree enumeration** — `Git.worktrees(repoRoot:)` lists every `GitWorktree` (path, branch, main/linked) via `git worktree list --porcelain`, with `isCurrent(relativeTo:)` for symlink-safe "which one am I in?" checks
+- 🗺️ **Status lookup map** — `GitStatusMap.build(status:repoRoot:)` turns a status list into O(1) per-path lookups: `kind(for:)` for a file's change kind and `directoryContainsChanges(_:)` for "does this collapsed folder hold changes?", keyed under every `/private/var` ↔ `/var` alias of the repo root so lookups never miss. `GitChangeKind.letter` gives the single-letter badge (A/M/D/R/U)
 - 🪶 **Zero dependencies** — Foundation only; shells out to the system `git`
-- 🧪 **Fully tested** — integration tests against throwaway repos (including linked and detached worktrees) plus direct unit tests of the diff-hunk and relative-time parsers
+- 🧪 **Fully tested** — integration tests against throwaway repos (including linked and detached worktrees) plus direct unit tests of the diff-hunk and relative-time parsers, and the status-map path keying / ancestor marking / alias resolution
 
 ## Requirements
 
