@@ -7,6 +7,7 @@ A thin, synchronous Swift wrapper over the `git` command-line tool — repositor
 - 📋 **Working-tree status** — `Git.status(repoRoot:)` returns one `(path, kind)` per changed file, parsed from `git status --porcelain=v1` (added / modified / deleted / untracked / renamed)
 - 📏 **Per-line gutter markers** — `Git.lineChanges(for:repoRoot:)` maps each 1-based line to a `GitChangeKind` for editor change bars
 - 👻 **Inline-diff phantom rows** — `Git.removedLines(for:repoRoot:)` returns deleted lines keyed by the surviving line they belong above, for Cursor-style inline diffs
+- ➕➖ **Working-tree diff stat** — `Git.diffStat(repoRoot:)` sums total insertions/deletions vs `HEAD` (`git diff --numstat`), for a "+312 −332" badge; `WorktreeSummary` carries these per worktree
 - 🧾 **Fast single-line blame** — `Git.blame(for:line:repoRoot:)` returns author, a short relative age, and the commit summary
 - ✅ **Staging actions** — `stage`, `unstage`, and a destructive `discard` (revert-to-HEAD or delete-untracked)
 - 🧭 **Repo discovery** — `Git.repoRoot(for:)` and repo-relative path resolution

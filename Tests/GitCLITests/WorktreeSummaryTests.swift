@@ -52,6 +52,36 @@ final class WorktreeSummaryTests: XCTestCase {
         XCTAssertTrue(summary.worktree.isMain)
     }
 
+    func testMakeCarriesLineStats() {
+        let summary = WorktreeSummary.make(worktree: fixtureWorktree(),
+                                           status: [("x", .modified)], insertions: 12, deletions: 5)
+        XCTAssertEqual(summary.insertions, 12)
+        XCTAssertEqual(summary.deletions, 5)
+    }
+
+    // MARK: - parseNumstat (pure)
+
+    func testParseNumstatSumsColumns() {
+        let out = "3\t1\tsrc/a.swift\n10\t4\tsrc/b.swift\n0\t7\tsrc/c.swift\n"
+        let (ins, del) = Git.parseNumstat(out)
+        XCTAssertEqual(ins, 13)
+        XCTAssertEqual(del, 12)
+    }
+
+    func testParseNumstatSkipsBinaryDashRows() {
+        // Binary files report "-\t-\t<path>".
+        let out = "5\t2\tsrc/a.swift\n-\t-\tassets/logo.png\n"
+        let (ins, del) = Git.parseNumstat(out)
+        XCTAssertEqual(ins, 5)
+        XCTAssertEqual(del, 2)
+    }
+
+    func testParseNumstatEmpty() {
+        let (ins, del) = Git.parseNumstat("")
+        XCTAssertEqual(ins, 0)
+        XCTAssertEqual(del, 0)
+    }
+
     // MARK: - Git.worktreeSummaries (integration)
 
     func testWorktreeSummariesReflectsEachTreesChanges() throws {

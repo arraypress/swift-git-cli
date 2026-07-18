@@ -74,4 +74,29 @@ public extension Git {
         flush()
         return result
     }
+
+    /// Total insertions/deletions in the working tree versus `HEAD` (staged +
+    /// unstaged tracked changes), summed across all files.
+    ///
+    /// Parses `git diff --numstat HEAD`. Untracked files are not counted (they're
+    /// absent from `git diff`); binary files contribute nothing. Returns `(0, 0)`
+    /// on an unborn `HEAD` or any failure.
+    static func diffStat(repoRoot root: URL) -> (insertions: Int, deletions: Int) {
+        guard let out = run(["diff", "--numstat", "--no-color", "HEAD"], in: root) else { return (0, 0) }
+        return parseNumstat(out)
+    }
+
+    /// Sums a `git diff --numstat` body. Each line is `<added>\t<deleted>\t<path>`;
+    /// binary files report `-` in both count columns and are skipped. Pure — exposed
+    /// for testing without a repo.
+    static func parseNumstat(_ text: String) -> (insertions: Int, deletions: Int) {
+        var insertions = 0, deletions = 0
+        for line in text.split(separator: "\n") {
+            let cols = line.split(separator: "\t")
+            guard cols.count >= 2 else { continue }
+            if let a = Int(cols[0]) { insertions += a }   // "-" (binary) → nil → skipped
+            if let d = Int(cols[1]) { deletions += d }
+        }
+        return (insertions, deletions)
+    }
 }

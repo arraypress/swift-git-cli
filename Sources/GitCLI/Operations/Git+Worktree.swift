@@ -85,7 +85,9 @@ public extension Git {
     /// - Returns: One ``WorktreeSummary`` per worktree, main first, or `[]` on failure.
     static func worktreeSummaries(repoRoot root: URL) -> [WorktreeSummary] {
         worktrees(repoRoot: root).map {
-            WorktreeSummary.make(worktree: $0, status: status(repoRoot: $0.path))
+            let stat = diffStat(repoRoot: $0.path)
+            return WorktreeSummary.make(worktree: $0, status: status(repoRoot: $0.path),
+                                        insertions: stat.insertions, deletions: stat.deletions)
         }
     }
 }
