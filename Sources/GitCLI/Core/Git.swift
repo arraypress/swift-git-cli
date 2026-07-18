@@ -96,7 +96,12 @@ public enum Git {
     /// the macOS `/private/var` ↔ `/var` symlink for paths that exist on disk,
     /// so a *deleted* file expressed via the unresolved form would otherwise
     /// fail the prefix check — see ``canonicalPath(_:)``.
-    static func relativePathIfUnderRoot(_ file: URL, root: URL) -> String? {
+    ///
+    /// Use this (not ``relativePath(_:root:)``) whenever a path may originate
+    /// outside the repo — e.g. an agent's absolute edit path — so an out-of-root
+    /// file is refused rather than collapsed to a bare basename that could match
+    /// an unrelated same-named file inside the repo.
+    public static func relativePathIfUnderRoot(_ file: URL, root: URL) -> String? {
         func relative(_ f: String, _ r: String) -> String? {
             f.hasPrefix(r + "/") ? String(f.dropFirst(r.count + 1)) : nil
         }
