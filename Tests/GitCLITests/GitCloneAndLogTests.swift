@@ -92,4 +92,52 @@ final class GitCloneAndLogTests: XCTestCase {
         XCTAssertFalse(result.succeeded)
         XCTAssertNotNil(result.error)
     }
+
+    // MARK: - Info (integration)
+
+    func testBranchAndCleanInfo() throws {
+        let root = try tempDir("gitinfo")
+        seedRepo(root, commits: ["seed"])
+        let branch = Git.currentBranch(repoRoot: root)
+        XCTAssertTrue(branch == "main" || branch == "master", "got \(branch ?? "nil")")
+        XCTAssertTrue(Git.isClean(repoRoot: root))
+        // Dirty it.
+        try "x".write(to: root.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+        XCTAssertFalse(Git.isClean(repoRoot: root))
+    }
+
+    func testLocalBranchesFlagsCurrent() throws {
+        let root = try tempDir("gitbranches")
+        seedRepo(root, commits: ["seed"])
+        _ = Git.run(["branch", "feature"], in: root)
+        let branches = Git.localBranches(repoRoot: root)
+        XCTAssertEqual(Set(branches.map(\.name)).isSuperset(of: ["feature"]), true)
+        XCTAssertEqual(branches.filter(\.isCurrent).count, 1)          // exactly one current
+        XCTAssertFalse(branches.first(where: { $0.name == "feature" })?.isCurrent ?? true)
+    }
+
+    func testAheadBehindWithNoUpstreamIsZero() throws {
+        let root = try tempDir("gitab")
+        seedRepo(root, commits: ["seed"])
+        XCTAssertEqual(Git.aheadBehind(repoRoot: root).ahead, 0)
+        XCTAssertEqual(Git.aheadBehind(repoRoot: root).behind, 0)
+    }
+
+    func testFileLogFollowsOneFile() throws {
+        let root = try tempDir("gitfilelog")
+        seedRepo(root, commits: ["c0"])   // creates f0.txt
+        // Touch f0.txt again in a new commit.
+        try "changed".write(to: root.appendingPathComponent("f0.txt"), atomically: true, encoding: .utf8)
+        _ = Git.run(["add", "-A"], in: root)
+        _ = Git.run(["commit", "-q", "-m", "touch f0"], in: root)
+        let hist = Git.fileLog(path: "f0.txt", repoRoot: root, limit: 10)
+        XCTAssertEqual(hist.map(\.subject), ["touch f0", "c0"])       // both commits touched f0.txt
+    }
+
+    func testShowFileAtRevision() throws {
+        let root = try tempDir("gitshowfile")
+        seedRepo(root, commits: ["seed"])   // f0.txt content "0"
+        let content = Git.showFile(revision: "HEAD", path: "f0.txt", repoRoot: root)
+        XCTAssertEqual(content?.trimmingCharacters(in: .whitespacesAndNewlines), "0")
+    }
 }
