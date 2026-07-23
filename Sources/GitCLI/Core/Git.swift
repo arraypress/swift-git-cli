@@ -51,6 +51,23 @@ public enum Git {
     /// - Returns: The command's standard output decoded as UTF-8, or `nil` if the
     ///   process failed to launch or exited with a non-zero status.
     public static func run(_ args: [String], in dir: URL) -> String? {
+        run(args, in: dir, allowedStatuses: [])
+    }
+
+    /// Runs `git <args>` like ``run(_:in:)`` but also treats the exit statuses in
+    /// `allowedStatuses` as success.
+    ///
+    /// Some git subcommands use a non-zero exit to report a *result*, not a
+    /// failure — `git diff --no-index` exits 1 when the inputs differ, which is
+    /// its normal "found a difference" outcome.
+    ///
+    /// - Parameters:
+    ///   - args: Arguments passed to `git`.
+    ///   - dir: Working directory the command runs in.
+    ///   - allowedStatuses: Non-zero exit statuses to accept alongside 0.
+    /// - Returns: The command's standard output decoded as UTF-8, or `nil` if the
+    ///   process failed to launch or exited with a status outside the allowed set.
+    public static func run(_ args: [String], in dir: URL, allowedStatuses: Set<Int32>) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: executable)
         p.arguments = args
@@ -64,7 +81,7 @@ public enum Git {
         do { try p.run() } catch { return nil }
         let data = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
+        guard p.terminationStatus == 0 || allowedStatuses.contains(p.terminationStatus) else { return nil }
         return String(data: data, encoding: .utf8)
     }
 

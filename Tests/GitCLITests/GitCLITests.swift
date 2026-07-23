@@ -257,6 +257,57 @@ final class GitCLITests: XCTestCase {
         XCTAssertTrue(Git.status(repoRoot: root).isEmpty)
     }
 
+    func testDiscardStagedAdditionRemovesFromIndexAndDisk() throws {
+        // Regression: `checkout HEAD -- <path>` exits 1 for a staged-new file
+        // (the pathspec doesn't exist in HEAD), so the confirmed discard was a
+        // silent no-op. Reverting to HEAD means the file goes away entirely.
+        let root = try makeRepo()
+        try write("seed\n", to: "seed.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("seed.txt"), repoRoot: root)
+        commit("seed", in: root)
+
+        let file = root.appendingPathComponent("new.txt")
+        try write("brand new\n", to: "new.txt", in: root)
+        _ = Git.stage(file, repoRoot: root)
+        XCTAssertEqual(Git.status(repoRoot: root).first { $0.path == "new.txt" }?.kind, .added)
+
+        XCTAssertTrue(Git.discard(file, kind: .added, repoRoot: root))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertTrue(Git.status(repoRoot: root).isEmpty)
+    }
+
+    func testDiscardRenameRestoresOldNameAndRemovesNew() throws {
+        // Regression: status reports a rename under its NEW path, which doesn't
+        // exist in HEAD — `checkout HEAD -- <new>` exited 1 and nothing reverted.
+        let root = try makeRepo()
+        try write("contents\n", to: "old.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("old.txt"), repoRoot: root)
+        commit("seed", in: root)
+        _ = Git.run(["mv", "old.txt", "renamed.txt"], in: root)
+        XCTAssertEqual(Git.status(repoRoot: root).first?.kind, .renamed)
+
+        XCTAssertTrue(Git.discard(root.appendingPathComponent("renamed.txt"),
+                                  kind: .renamed, repoRoot: root))
+        XCTAssertTrue(Git.status(repoRoot: root).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("renamed.txt").path))
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("old.txt"),
+                                  encoding: .utf8), "contents\n")
+    }
+
+    func testDiscardRenameWithSpacedPaths() throws {
+        let root = try makeRepo()
+        try write("contents\n", to: "old name.txt", in: root)
+        _ = Git.stage(root.appendingPathComponent("old name.txt"), repoRoot: root)
+        commit("seed", in: root)
+        _ = Git.run(["mv", "old name.txt", "new name.txt"], in: root)
+
+        XCTAssertTrue(Git.discard(root.appendingPathComponent("new name.txt"),
+                                  kind: .renamed, repoRoot: root))
+        XCTAssertTrue(Git.status(repoRoot: root).isEmpty)
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("old name.txt"),
+                                  encoding: .utf8), "contents\n")
+    }
+
     func testDiscardRefusesFileOutsideRepoAndDoesNotClobberSameNamedRootFile() throws {
         // Regression: `relativePath` used to fall back to the bare filename for a
         // file it couldn't place under root, so `discard` ran
@@ -327,6 +378,34 @@ final class GitCLITests: XCTestCase {
         let marks = Git.lineChanges(for: file, repoRoot: root)
         XCTAssertEqual(marks[3], .added)
         XCTAssertEqual(marks[4], .added)
+    }
+
+    func testLineChangesAllMatchesPerFileCalls() throws {
+        // One `git diff --unified=0 HEAD` spawn must report the same per-file maps
+        // as N per-file lineChanges calls — including content lines the diff
+        // renders as "+++ b/…" / "--- a/…" (an added "++ b/decoy" line), which
+        // must not be mistaken for file headers mid-hunk.
+        let root = try makeRepo()
+        try write("line1\nline2\nline3\n", to: "one.txt", in: root)
+        try write("a\nb\nc\nd\ne\n", to: "two.txt", in: root)
+        try write("keep\n", to: "gone.txt", in: root)
+        for f in ["one.txt", "two.txt", "gone.txt"] {
+            _ = Git.stage(root.appendingPathComponent(f), repoRoot: root)
+        }
+        commit("seed", in: root)
+        try write("line1\nCHANGED\nline3\nadded\n", to: "one.txt", in: root)
+        try write("++ b/decoy\na\nb\nc\nd\nCHANGED\n", to: "two.txt", in: root)
+        try FileManager.default.removeItem(at: root.appendingPathComponent("gone.txt"))
+        try write("untracked\n", to: "new.txt", in: root)
+
+        let all = Git.lineChangesAll(repoRoot: root)
+        XCTAssertNil(all["decoy"])
+        for f in ["one.txt", "two.txt", "gone.txt"] {
+            XCTAssertEqual(all[f], Git.lineChanges(for: root.appendingPathComponent(f), repoRoot: root), f)
+        }
+        XCTAssertNil(all["new.txt"])   // untracked: absent, like the per-file call's [:]
+        XCTAssertEqual(all["one.txt"]?[2], .modified)
+        XCTAssertEqual(all["one.txt"]?[4], .added)
     }
 
     // MARK: - removedLines

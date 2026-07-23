@@ -19,24 +19,116 @@ public extension Git {
     ///
     /// - Returns: A map from 1-based line number to ``GitChangeKind``.
     static func lineChanges(for file: URL, repoRoot root: URL) -> [Int: GitChangeKind] {
+        lineDiff(for: file, repoRoot: root).marks
+    }
+
+    /// Both gutter maps for one file versus `HEAD` — the per-line change kinds
+    /// *and* the removed-line text — from a **single** `git diff --unified=0`
+    /// run, where calling ``lineChanges(for:repoRoot:)`` and
+    /// ``removedLines(for:repoRoot:)`` separately would spawn (and parse) the
+    /// identical diff twice.
+    ///
+    /// - Returns: `marks` exactly as ``lineChanges(for:repoRoot:)`` returns it
+    ///   (added/modified lines keyed by their 1-based working-copy line; a pure
+    ///   deletion marks the surviving line just below), and `removed` exactly as
+    ///   ``removedLines(for:repoRoot:)`` returns it (removed text keyed by the
+    ///   1-based new-file line it renders above).
+    static func lineDiff(for file: URL, repoRoot root: URL) -> (marks: [Int: GitChangeKind], removed: [Int: [String]]) {
         let rel = relativePath(file, root: root)
-        guard let diff = run(["diff", "--unified=0", "--no-color", "HEAD", "--", rel], in: root) else { return [:] }
+        guard let diff = run(["diff", "--unified=0", "--no-color", "HEAD", "--", rel], in: root) else {
+            return ([:], [:])
+        }
         var marks: [Int: GitChangeKind] = [:]
-        for line in diff.split(separator: "\n", omittingEmptySubsequences: false) where line.hasPrefix("@@") {
-            // @@ -oldStart[,oldCount] +newStart[,newCount] @@
-            let parts = line.split(separator: " ")
-            guard parts.count >= 3 else { continue }
-            let old = parts[1], new = parts[2]   // "-a,b", "+c,d"
-            let oldCount = counts(old).1
-            let (newStart, newCount) = counts(new)
-            if newCount == 0 {
-                marks[max(1, newStart)] = .deleted            // pure deletion
-            } else {
-                let kind: GitChangeKind = oldCount == 0 ? .added : .modified
-                for l in newStart..<(newStart + newCount) { marks[l] = kind }
+        var removed: [Int: [String]] = [:]
+        var pending: [String] = []
+        var anchor = 1
+        var inHunk = false   // real `---`/`+++` file headers only precede the first @@
+        func flush() {
+            if !pending.isEmpty { removed[anchor, default: []].append(contentsOf: pending); pending = [] }
+        }
+        for line in diff.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("@@") {
+                flush()
+                inHunk = true
+                // @@ -oldStart[,oldCount] +newStart[,newCount] @@
+                let parts = line.split(separator: " ")
+                guard parts.count >= 3 else { continue }
+                let oldCount = counts(parts[1]).1
+                let (newStart, newCount) = counts(parts[2])
+                if newCount == 0 {
+                    marks[max(1, newStart)] = .deleted            // pure deletion
+                    anchor = max(1, newStart + 1)                 // after a pure deletion
+                } else {
+                    let kind: GitChangeKind = oldCount == 0 ? .added : .modified
+                    for l in newStart..<(newStart + newCount) { marks[l] = kind }
+                    anchor = newStart                             // above the first new line
+                }
+            } else if inHunk, line.hasPrefix("-") {
+                pending.append(String(line.dropFirst()))   // removed content (even if it starts with "--")
             }
         }
-        return marks
+        flush()
+        return (marks, removed)
+    }
+
+    /// Unified diff presenting an untracked file as all-new content — what
+    /// `git diff HEAD` cannot show (untracked files are invisible to it).
+    ///
+    /// Runs `git diff --no-index /dev/null <path>`, which exits 1 when the
+    /// inputs differ — its normal "found a difference" result, hence the widened
+    /// exit contract. The output is a regular unified diff (`diff --git` header,
+    /// `--- /dev/null`, `+++ b/<path>`, one all-additions hunk), so it splices
+    /// cleanly into any combined-diff rendering.
+    ///
+    /// - Returns: The synthesized diff, or `""` when `file` is not under `root`
+    ///   or is missing/unreadable.
+    static func untrackedDiff(for file: URL, repoRoot root: URL) -> String {
+        guard let rel = relativePathIfUnderRoot(file, root: root) else { return "" }
+        return run(["-c", "core.quotePath=false", "diff", "--no-color", "--no-index", "--", "/dev/null", rel],
+                   in: root, allowedStatuses: [1]) ?? ""
+    }
+
+    /// Per-file changed-line maps for the whole working tree versus `HEAD`, from
+    /// one `git diff --unified=0 HEAD` — one process spawn instead of one
+    /// ``lineChanges(for:repoRoot:)`` spawn per changed file.
+    ///
+    /// Keys are repository-relative paths (the new path for a rename; the old
+    /// path for a deletion); each value matches what
+    /// ``lineChanges(for:repoRoot:)`` returns for that file. Untracked files are
+    /// absent (they're absent from `git diff`), matching the per-file call's
+    /// empty result for them.
+    static func lineChangesAll(repoRoot root: URL) -> [String: [Int: GitChangeKind]] {
+        // core.quotePath=false keeps non-ASCII paths verbatim in the ---/+++
+        // headers instead of C-style octal-escaped.
+        guard let diff = run(["-c", "core.quotePath=false", "diff", "--unified=0", "--no-color", "HEAD"],
+                             in: root) else { return [:] }
+        var all: [String: [Int: GitChangeKind]] = [:]
+        var aPath: String?, bPath: String?
+        var inHunk = false   // real ---/+++ headers only appear between `diff --git` and the first @@
+        func headerPath(_ s: Substring) -> String? {
+            guard s != "/dev/null" else { return nil }
+            let p = (s.hasPrefix("a/") || s.hasPrefix("b/")) ? s.dropFirst(2) : s
+            return String(p)
+        }
+        for line in diff.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("diff --git ") { inHunk = false; aPath = nil; bPath = nil; continue }
+            if !inHunk, line.hasPrefix("--- ") { aPath = headerPath(line.dropFirst(4)); continue }
+            if !inHunk, line.hasPrefix("+++ ") { bPath = headerPath(line.dropFirst(4)); continue }
+            guard line.hasPrefix("@@") else { continue }
+            inHunk = true
+            guard let path = bPath ?? aPath else { continue }
+            let parts = line.split(separator: " ")
+            guard parts.count >= 3 else { continue }
+            let oldCount = counts(parts[1]).1
+            let (newStart, newCount) = counts(parts[2])
+            if newCount == 0 {
+                all[path, default: [:]][max(1, newStart)] = .deleted
+            } else {
+                let kind: GitChangeKind = oldCount == 0 ? .added : .modified
+                for l in newStart..<(newStart + newCount) { all[path, default: [:]][l] = kind }
+            }
+        }
+        return all
     }
 
     /// Removed (old) lines to ghost inline as phantom rows, for a Cursor-style
@@ -49,30 +141,7 @@ public extension Git {
     /// - Returns: A map from 1-based new-file line number to the removed lines'
     ///   text, in order.
     static func removedLines(for file: URL, repoRoot root: URL) -> [Int: [String]] {
-        let rel = relativePath(file, root: root)
-        guard let diff = run(["diff", "--unified=0", "--no-color", "HEAD", "--", rel], in: root) else { return [:] }
-        var result: [Int: [String]] = [:]
-        var pending: [String] = []
-        var anchor = 1
-        var inHunk = false   // real `---`/`+++` file headers only precede the first @@
-        func flush() {
-            if !pending.isEmpty { result[anchor, default: []].append(contentsOf: pending); pending = [] }
-        }
-        for raw in diff.split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = String(raw)
-            if line.hasPrefix("@@") {
-                flush()
-                inHunk = true
-                let parts = line.split(separator: " ")   // @@ -oldS,oldC +newS,newC @@
-                guard parts.count >= 3 else { continue }
-                let (newStart, newCount) = counts(parts[2])
-                anchor = newCount > 0 ? newStart : max(1, newStart + 1)   // above the first new line, or after a pure deletion
-            } else if inHunk, line.hasPrefix("-") {
-                pending.append(String(line.dropFirst()))   // removed content (even if it starts with "--")
-            }
-        }
-        flush()
-        return result
+        lineDiff(for: file, repoRoot: root).removed
     }
 
     /// Total insertions/deletions in the working tree versus `HEAD` (staged +
